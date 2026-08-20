@@ -42,6 +42,23 @@ func WindowReloadApp(ctx context.Context) {
 	appFrontend.WindowReloadApp()
 }
 
+// WindowUnloadWebView destroys the platform webview while keeping the
+// window itself alive, allowing the OS to reclaim the memory used by the
+// webview's rendering process. Use WindowReloadWebView to recreate it.
+// Not supported on all platforms.
+func WindowUnloadWebView(ctx context.Context) {
+	appFrontend := getFrontend(ctx)
+	appFrontend.WindowUnloadWebView()
+}
+
+// WindowReloadWebView recreates the platform webview after a previous call
+// to WindowUnloadWebView and reloads the application. It is a no-op if the
+// webview is already loaded. Not supported on all platforms.
+func WindowReloadWebView(ctx context.Context) {
+	appFrontend := getFrontend(ctx)
+	appFrontend.WindowReloadWebView()
+}
+
 func WindowSetSystemDefaultTheme(ctx context.Context) {
 	appFrontend := getFrontend(ctx)
 	appFrontend.WindowSetSystemDefaultTheme()

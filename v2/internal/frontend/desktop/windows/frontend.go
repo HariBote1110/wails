@@ -301,6 +301,16 @@ func (f *Frontend) WindowUnfullscreen() {
 	f.mainWindow.UnFullscreen()
 }
 
+// WindowUnloadWebView is not supported on Windows.
+func (f *Frontend) WindowUnloadWebView() {
+	f.logger.Warning("WindowUnloadWebView is not supported on Windows")
+}
+
+// WindowReloadWebView is not supported on Windows.
+func (f *Frontend) WindowReloadWebView() {
+	f.logger.Warning("WindowReloadWebView is not supported on Windows")
+}
+
 func (f *Frontend) WindowShow() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()

@@ -320,6 +320,16 @@ func (f *Frontend) WindowReloadApp() {
 	f.ExecJS(fmt.Sprintf("window.location.href = '%s';", f.startURL))
 }
 
+// WindowUnloadWebView is not supported on Linux.
+func (f *Frontend) WindowUnloadWebView() {
+	f.logger.Warning("WindowUnloadWebView is not supported on Linux")
+}
+
+// WindowReloadWebView is not supported on Linux.
+func (f *Frontend) WindowReloadWebView() {
+	f.logger.Warning("WindowReloadWebView is not supported on Linux")
+}
+
 func (f *Frontend) WindowShow() {
 	f.mainWindow.Show()
 }

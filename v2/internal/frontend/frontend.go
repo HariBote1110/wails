@@ -113,6 +113,14 @@ type Frontend interface {
 	WindowSetBackgroundColour(col *options.RGBA)
 	WindowReload()
 	WindowReloadApp()
+	// WindowUnloadWebView tears down the platform webview while keeping the
+	// window itself alive, allowing the OS to reclaim the memory used by the
+	// webview's rendering process. Not supported on all platforms.
+	WindowUnloadWebView()
+	// WindowReloadWebView recreates the platform webview after a call to
+	// WindowUnloadWebView and reloads the application's start URL. It is a
+	// no-op if the webview is already loaded. Not supported on all platforms.
+	WindowReloadWebView()
 	WindowSetSystemDefaultTheme()
 	WindowSetLightTheme()
 	WindowSetDarkTheme()
