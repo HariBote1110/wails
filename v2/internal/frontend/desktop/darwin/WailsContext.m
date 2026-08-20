@@ -109,7 +109,7 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
     [self.mouseEvent release];
     [self.userContentController release];
     [self.applicationMenu release];
-    [self.webviewConfiguration release];
+    // wailsURLSchemeHandler is assign (not retained) - see WailsContext.h.
     [self.startURLString release];
     [super dealloc];
 }
@@ -216,45 +216,15 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
     [self.mainWindow setDelegate:windowDelegate];
 
     // Webview stuff here!
-    WKWebViewConfiguration *config = [WKWebViewConfiguration new];
-    config.suppressesIncrementalRendering = true;
-    config.applicationNameForUserAgent = @"wails.io";
-    [config setURLSchemeHandler:self forURLScheme:@"wails"];
-
-    if (preferences.tabFocusesLinks != NULL) {
-        config.preferences.tabFocusesLinks = *preferences.tabFocusesLinks;
-    }
-
-#if MAC_OS_X_VERSION_MAX_ALLOWED >= 110300
-    if (@available(macOS 11.3, *)) {
-        if (preferences.textInteractionEnabled != NULL) {
-            config.preferences.textInteractionEnabled = *preferences.textInteractionEnabled;
-        }
-    }
-#endif
-
-#if MAC_OS_X_VERSION_MAX_ALLOWED >= 120300
-    if (@available(macOS 12.3, *)) {
-            if (preferences.fullscreenEnabled != NULL) {
-                config.preferences.elementFullscreenEnabled = *preferences.fullscreenEnabled;
-            }
-    }
-#endif
-
-#if MAC_OS_X_VERSION_MAX_ALLOWED >= 101500
-    if (@available(macOS 10.15, *)) {
-        config.preferences.fraudulentWebsiteWarningEnabled = fraudulentWebsiteWarningEnabled;
-    }
-#endif
-
+    //
+    // Only the reusable pieces are captured on self (WKUserContentController,
+    // the wails:// scheme handler, and the primitive preference flags below).
+    // attachWebView assembles a brand new WKWebViewConfiguration from these
+    // every time it runs, so that UnloadWebView never leaves a
+    // WKWebViewConfiguration (and its WKProcessPool) retained.
     WKUserContentController* userContentController = [WKUserContentController new];
     [userContentController addScriptMessageHandler:self name:@"external"];
-    config.userContentController = userContentController;
     self.userContentController = userContentController;
-
-    if (self.devtoolsEnabled) {
-        [config.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
-    }
 
     if (!self.defaultContextMenuEnabled) {
         // Disable default context menus
@@ -265,11 +235,34 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
         [userContentController addUserScript:initScript];
     }
 
-    // Keep the configuration (and the flags needed to recreate the webview)
-    // retained on self so that UnloadWebView/ReloadWebView can destroy and
-    // later rebuild the webview while reusing the same WKUserContentController,
-    // scheme handler registration and preferences.
-    self.webviewConfiguration = config;
+    // Obtain the wails:// scheme handler via the public API on a throwaway
+    // configuration, so attachWebView can re-register the same handler
+    // object on every freshly built WKWebViewConfiguration without a second
+    // hard-coded reference to `self` and the scheme name.
+    {
+        WKWebViewConfiguration *schemeProbeConfig = [WKWebViewConfiguration new];
+        [schemeProbeConfig setURLSchemeHandler:self forURLScheme:@"wails"];
+        self.wailsURLSchemeHandler = [schemeProbeConfig urlSchemeHandlerForURLScheme:@"wails"];
+        [schemeProbeConfig release];
+    }
+
+    self.fraudulentWebsiteWarningEnabled = fraudulentWebsiteWarningEnabled;
+
+    self.hasTabFocusesLinks = preferences.tabFocusesLinks != NULL;
+    if (self.hasTabFocusesLinks) {
+        self.tabFocusesLinksValue = *preferences.tabFocusesLinks;
+    }
+
+    self.hasTextInteractionEnabled = preferences.textInteractionEnabled != NULL;
+    if (self.hasTextInteractionEnabled) {
+        self.textInteractionEnabledValue = *preferences.textInteractionEnabled;
+    }
+
+    self.hasFullscreenEnabled = preferences.fullscreenEnabled != NULL;
+    if (self.hasFullscreenEnabled) {
+        self.fullscreenEnabledValue = *preferences.fullscreenEnabled;
+    }
+
     self.webviewIsTransparent = webviewIsTransparent;
     self.enableDragAndDrop = enableDragAndDrop;
     self.disableWebViewDragAndDrop = disableWebViewDragAndDrop;
@@ -301,14 +294,54 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
 
 }
 
-// attachWebView creates the WailsWebView and adds it to the content view,
-// reusing the retained webviewConfiguration (and the flags captured from
-// CreateWindow). It is used both by CreateWindow on startup and by
+// attachWebView creates the WailsWebView and adds it to the content view. It
+// builds a brand new WKWebViewConfiguration from the reusable pieces
+// captured on self by CreateWindow (WKUserContentController, wails://
+// scheme handler, preference flags) rather than reusing a retained
+// configuration object - see the comment above the property declarations in
+// WailsContext.h for why. It is used both by CreateWindow on startup and by
 // ReloadWebView after a previous call to UnloadWebView.
 - (void) attachWebView {
     id contentView = [self.mainWindow contentView];
 
-    self.webview = [[WailsWebView alloc] initWithFrame:CGRectZero configuration:self.webviewConfiguration];
+    WKWebViewConfiguration *config = [WKWebViewConfiguration new];
+    config.suppressesIncrementalRendering = true;
+    config.applicationNameForUserAgent = @"wails.io";
+    [config setURLSchemeHandler:self.wailsURLSchemeHandler forURLScheme:@"wails"];
+    config.userContentController = self.userContentController;
+
+    if (self.hasTabFocusesLinks) {
+        config.preferences.tabFocusesLinks = self.tabFocusesLinksValue;
+    }
+
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 110300
+    if (@available(macOS 11.3, *)) {
+        if (self.hasTextInteractionEnabled) {
+            config.preferences.textInteractionEnabled = self.textInteractionEnabledValue;
+        }
+    }
+#endif
+
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 120300
+    if (@available(macOS 12.3, *)) {
+        if (self.hasFullscreenEnabled) {
+            config.preferences.elementFullscreenEnabled = self.fullscreenEnabledValue;
+        }
+    }
+#endif
+
+#if MAC_OS_X_VERSION_MAX_ALLOWED >= 101500
+    if (@available(macOS 10.15, *)) {
+        config.preferences.fraudulentWebsiteWarningEnabled = self.fraudulentWebsiteWarningEnabled;
+    }
+#endif
+
+    if (self.devtoolsEnabled) {
+        [config.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
+    }
+
+    self.webview = [[WailsWebView alloc] initWithFrame:CGRectZero configuration:config];
+    [config release];
     [self.webview autorelease];
     self.webview.enableDragAndDrop = self.enableDragAndDrop;
     self.webview.disableWebViewDragAndDrop = self.disableWebViewDragAndDrop;
@@ -326,13 +359,26 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
     self.webview.UIDelegate = self;
 }
 
-// UnloadWebView removes the webview from the window and releases it, which
-// (once WebKit tears down the associated WebContent process) returns the
-// memory used for rendering back to the OS. The window itself, and the
-// retained webviewConfiguration (including its WKUserContentController with
-// the registered "external" message handler and the Wails runtime bootstrap
-// user script), are left untouched so ReloadWebView can recreate the webview
-// later.
+// UnloadWebView removes the webview from the window and releases it so that
+// its WebContent process can exit. The primary mechanism that makes this
+// deterministic is that self no longer retains a WKWebViewConfiguration (see
+// attachWebView) - a retained configuration keeps a WKProcessPool alive,
+// which keeps WebKit's ties to the WebContent process alive, which is why an
+// earlier version of this method released the webview but observed the
+// WebContent process survive (shrunken and App Nap-suspended) with its
+// memory only reclaimed minutes later at a nondeterministic time.
+//
+// As a secondary, best-effort nudge, this also invokes the private WebKit
+// SPI `-[WKWebView _close]`, which synchronously tears down the webview's
+// process connection. It is not part of the public API, is not guaranteed
+// to exist on every WebKit version, and is guarded with respondsToSelector:
+// - if it is unavailable, UnloadWebView silently falls back to the config
+// rebuild being the only mechanism.
+//
+// The window itself, and the retained WKUserContentController (with the
+// registered "external" message handler and the Wails runtime bootstrap
+// user script) and wails:// scheme handler, are left untouched so
+// ReloadWebView can recreate the webview later.
 - (void) UnloadWebView {
     if (self.webview == nil) {
         return;
@@ -342,6 +388,16 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
     self.webview.UIDelegate = nil;
     [self.webview stopLoading];
     [self.webview removeFromSuperview];
+
+    SEL closeSelector = @selector(_close);
+    if ([self.webview respondsToSelector:closeSelector]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [self.webview performSelector:closeSelector];
+#pragma clang diagnostic pop
+    }
+
     self.webview = nil;
 }
 

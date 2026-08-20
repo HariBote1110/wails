@@ -36,13 +36,32 @@
 @property (retain) WailsWebView* webview;
 @property (nonatomic, assign) id appdelegate;
 
-// webviewConfiguration is kept alive independently of the webview instance so
-// that UnloadWebView can destroy the webview (and its WebContent process)
-// while ReloadWebView can later recreate a webview that reuses the same
-// configuration - in particular the same WKUserContentController, which
-// keeps the registered script message handlers and injected user scripts
-// (i.e. the Wails JS runtime bridge) without having to re-register them.
-@property (retain) WKWebViewConfiguration* webviewConfiguration;
+// Deliberately NOT retaining a WKWebViewConfiguration across unload/reload
+// cycles. WKWebViewConfiguration carries a WKProcessPool, and keeping one
+// alive on self keeps WebKit's ties to the WebContent process alive too,
+// which is what previously stopped UnloadWebView from actually letting the
+// WebContent process exit. Instead only the reusable *pieces* of the
+// configuration are retained below, and attachWebView builds a brand new
+// WKWebViewConfiguration from them every time it runs.
+
+// wailsURLSchemeHandler is the object registered for the "wails" URL scheme
+// (obtained once via -[WKWebViewConfiguration urlSchemeHandlerForURLScheme:]
+// in CreateWindow). In practice this is always `self`, so it is stored
+// unretained (assign) to avoid a self-retain cycle - self already owns this
+// reference's lifetime.
+@property (nonatomic, assign) id<WKURLSchemeHandler> wailsURLSchemeHandler;
+
+// Primitive preference flags captured from CreateWindow's Preferences struct
+// and fraudulentWebsiteWarningEnabled argument, re-applied to every freshly
+// built WKWebViewConfiguration in attachWebView.
+@property bool fraudulentWebsiteWarningEnabled;
+@property bool hasTabFocusesLinks;
+@property bool tabFocusesLinksValue;
+@property bool hasTextInteractionEnabled;
+@property bool textInteractionEnabledValue;
+@property bool hasFullscreenEnabled;
+@property bool fullscreenEnabledValue;
+
 @property bool webviewIsTransparent;
 @property bool enableDragAndDrop;
 @property bool disableWebViewDragAndDrop;
