@@ -36,6 +36,18 @@
 @property (retain) WailsWebView* webview;
 @property (nonatomic, assign) id appdelegate;
 
+// webviewConfiguration is kept alive independently of the webview instance so
+// that UnloadWebView can destroy the webview (and its WebContent process)
+// while ReloadWebView can later recreate a webview that reuses the same
+// configuration - in particular the same WKUserContentController, which
+// keeps the registered script message handlers and injected user scripts
+// (i.e. the Wails JS runtime bridge) without having to re-register them.
+@property (retain) WKWebViewConfiguration* webviewConfiguration;
+@property bool webviewIsTransparent;
+@property bool enableDragAndDrop;
+@property bool disableWebViewDragAndDrop;
+@property (retain) NSString* startURLString;
+
 @property bool hideOnClose;
 @property bool shuttingDown;
 @property bool startHidden;
@@ -99,6 +111,10 @@ struct Preferences {
 - (void) loadRequest:(NSString*)url;
 - (void) ExecJS:(NSString*)script;
 - (NSScreen*) getCurrentScreen;
+
+- (void) attachWebView;
+- (void) UnloadWebView;
+- (void) ReloadWebView;
 
 - (void) SetAbout :(NSString*)title :(NSString*)description :(void*)imagedata :(int)datalen;
 - (void) dealloc;

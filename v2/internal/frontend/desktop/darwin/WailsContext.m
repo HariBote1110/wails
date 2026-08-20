@@ -109,6 +109,8 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
     [self.mouseEvent release];
     [self.userContentController release];
     [self.applicationMenu release];
+    [self.webviewConfiguration release];
+    [self.startURLString release];
     [super dealloc];
 }
 
@@ -263,23 +265,16 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
         [userContentController addUserScript:initScript];
     }
 
-    self.webview = [WailsWebView alloc];
-    self.webview.enableDragAndDrop = enableDragAndDrop;
-    self.webview.disableWebViewDragAndDrop = disableWebViewDragAndDrop;
+    // Keep the configuration (and the flags needed to recreate the webview)
+    // retained on self so that UnloadWebView/ReloadWebView can destroy and
+    // later rebuild the webview while reusing the same WKUserContentController,
+    // scheme handler registration and preferences.
+    self.webviewConfiguration = config;
+    self.webviewIsTransparent = webviewIsTransparent;
+    self.enableDragAndDrop = enableDragAndDrop;
+    self.disableWebViewDragAndDrop = disableWebViewDragAndDrop;
 
-    CGRect init = { 0,0,0,0 };
-    [self.webview initWithFrame:init configuration:config];
-    [contentView addSubview:self.webview];
-    [self.webview setAutoresizingMask: NSViewWidthSizable|NSViewHeightSizable];
-    CGRect contentViewBounds = [contentView bounds];
-    [self.webview setFrame:contentViewBounds];
-
-    if (webviewIsTransparent) {
-        [self.webview setValue:[NSNumber numberWithBool:!webviewIsTransparent] forKey:@"drawsBackground"];
-    }
-
-    [self.webview setNavigationDelegate:self];
-    self.webview.UIDelegate = self;
+    [self attachWebView];
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:FALSE forKey:@"NSAutomaticQuoteSubstitutionEnabled"];
@@ -306,6 +301,68 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
 
 }
 
+// attachWebView creates the WailsWebView and adds it to the content view,
+// reusing the retained webviewConfiguration (and the flags captured from
+// CreateWindow). It is used both by CreateWindow on startup and by
+// ReloadWebView after a previous call to UnloadWebView.
+- (void) attachWebView {
+    id contentView = [self.mainWindow contentView];
+
+    self.webview = [[WailsWebView alloc] initWithFrame:CGRectZero configuration:self.webviewConfiguration];
+    [self.webview autorelease];
+    self.webview.enableDragAndDrop = self.enableDragAndDrop;
+    self.webview.disableWebViewDragAndDrop = self.disableWebViewDragAndDrop;
+
+    [contentView addSubview:self.webview];
+    [self.webview setAutoresizingMask: NSViewWidthSizable|NSViewHeightSizable];
+    CGRect contentViewBounds = [contentView bounds];
+    [self.webview setFrame:contentViewBounds];
+
+    if (self.webviewIsTransparent) {
+        [self.webview setValue:[NSNumber numberWithBool:!self.webviewIsTransparent] forKey:@"drawsBackground"];
+    }
+
+    [self.webview setNavigationDelegate:self];
+    self.webview.UIDelegate = self;
+}
+
+// UnloadWebView removes the webview from the window and releases it, which
+// (once WebKit tears down the associated WebContent process) returns the
+// memory used for rendering back to the OS. The window itself, and the
+// retained webviewConfiguration (including its WKUserContentController with
+// the registered "external" message handler and the Wails runtime bootstrap
+// user script), are left untouched so ReloadWebView can recreate the webview
+// later.
+- (void) UnloadWebView {
+    if (self.webview == nil) {
+        return;
+    }
+
+    [self.webview setNavigationDelegate:nil];
+    self.webview.UIDelegate = nil;
+    [self.webview stopLoading];
+    [self.webview removeFromSuperview];
+    self.webview = nil;
+}
+
+// ReloadWebView recreates the webview (if it was previously destroyed by
+// UnloadWebView) and reloads the application's start URL. It is a no-op if
+// the webview already exists.
+- (void) ReloadWebView {
+    if (self.webview != nil) {
+        return;
+    }
+    if (self.shuttingDown) {
+        return;
+    }
+
+    [self attachWebView];
+
+    if (self.startURLString != nil) {
+        [self loadRequest:self.startURLString];
+    }
+}
+
 - (NSMenuItem*) newMenuItem :(NSString*)title :(SEL)selector :(NSString*)key :(NSEventModifierFlags)flags {
     NSMenuItem *result = [[[NSMenuItem alloc] initWithTitle:title action:selector keyEquivalent:key] autorelease];
     if( flags != 0 ) {
@@ -329,6 +386,12 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
 }
 
 - (void) loadRequest :(NSString*)url {
+    self.startURLString = url;
+
+    if (self.webview == nil) {
+        return;
+    }
+
     NSURL *wkUrl = [NSURL URLWithString:url];
     NSURLRequest *wkRequest = [NSURLRequest requestWithURL:wkUrl];
     [self.webview loadRequest:wkRequest];
@@ -434,6 +497,9 @@ typedef void (^schemeTaskCaller)(id<WKURLSchemeTask>);
 }
 
 - (void) ExecJS:(NSString*)script {
+   if (self.webview == nil) {
+       return;
+   }
    [self.webview evaluateJavaScript:script completionHandler:nil];
 }
 
