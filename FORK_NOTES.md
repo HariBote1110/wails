@@ -63,15 +63,27 @@ methods automatically.
 Files: `v2/internal/frontend/desktop/darwin/{WailsContext.h, WailsContext.m,
 Application.h, Application.m, window.go, frontend.go}`.
 
-- `WailsContext` now retains the pieces needed to recreate a webview
-  independently of the webview object itself:
-  - `webviewConfiguration` (`WKWebViewConfiguration*`) — created once in
-    `CreateWindow` and kept alive. Its `WKUserContentController` (added via
-    `config.userContentController`) is what carries the registered
-    `"external"` script message handler (the IPC bridge) and the injected
-    user script (the disable-context-menu flag), so it is **not**
-    re-registered on recreation — it simply comes along with the reused
-    configuration.
+- `WailsContext` retains only the reusable *pieces* needed to rebuild a
+  webview independently of the webview object itself — deliberately **not**
+  a `WKWebViewConfiguration** (see "Why `UnloadWebView` didn't actually
+  terminate the process" below for why that distinction matters):
+  - `userContentController` (`WKUserContentController*`, already retained
+    prior to this change) — carries the registered `"external"` script
+    message handler (the IPC bridge) and the injected user script (the
+    disable-context-menu flag). Reused as-is on every rebuilt configuration.
+  - `wailsURLSchemeHandler` (`id<WKURLSchemeHandler>`, `assign`/unretained)
+    — the object registered for the `wails://` scheme, obtained once via the
+    public `-[WKWebViewConfiguration urlSchemeHandlerForURLScheme:]` in
+    `CreateWindow`. In practice this is always `self`; it is stored
+    unretained to avoid a self-retain cycle (self already owns this
+    reference's lifetime, the same pattern already used for `appdelegate`).
+  - Primitive preference flags captured from `CreateWindow`'s `Preferences`
+    struct and `fraudulentWebsiteWarningEnabled` argument
+    (`fraudulentWebsiteWarningEnabled`, `hasTabFocusesLinks`/
+    `tabFocusesLinksValue`, `hasTextInteractionEnabled`/
+    `textInteractionEnabledValue`, `hasFullscreenEnabled`/
+    `fullscreenEnabledValue`) — re-applied to a fresh `WKPreferences` on
+    every rebuild.
   - `webviewIsTransparent`, `enableDragAndDrop`, `disableWebViewDragAndDrop`
     — the flags `CreateWindow` originally used to configure the webview,
     needed again by `ReloadWebView`.
@@ -79,16 +91,23 @@ Application.h, Application.m, window.go, frontend.go}`.
     time `loadRequest:` is called, i.e. at startup via `Application.m`'s
     `Run()`), reused by `ReloadWebView` to reload the same start URL.
 - The webview-construction logic that used to live inline in `CreateWindow`
-  was factored into a new method, `- (void) attachWebView`, which builds a
-  `WailsWebView` from the retained configuration, adds it to the content
-  view with the same frame/autoresizing/transparency/delegate setup as
-  before, and is now called both by `CreateWindow` (startup) and by
-  `ReloadWebView` (recreation).
+  was factored into a method, `- (void) attachWebView`, which now builds a
+  **brand new `WKWebViewConfiguration`** from the pieces above every time it
+  runs (instead of reusing one retained instance), assembles a `WailsWebView`
+  from it, adds it to the content view with the same
+  frame/autoresizing/transparency/delegate setup as before, and is called
+  both by `CreateWindow` (startup) and by `ReloadWebView` (recreation). The
+  local `config` is released immediately after handing it to
+  `-[WailsWebView initWithFrame:configuration:]`, which — per Apple's
+  documented `WKWebViewConfiguration` copy-at-init behaviour — takes its own
+  immutable copy, so releasing the local variable does not affect the live
+  webview.
 - `- (void) UnloadWebView` clears the navigation/UI delegates, stops any
-  in-flight load, removes the webview from its superview, and sets
-  `self.webview = nil` — releasing WebKit's last strong reference so the
-  `WKWebView` (and its WebContent process) can be torn down. No-op if
-  already unloaded.
+  in-flight load, removes the webview from its superview, then — as a
+  best-effort, SPI-guarded nudge — invokes the private WebKit method
+  `-[WKWebView _close]` if `respondsToSelector:` confirms it exists, and
+  finally sets `self.webview = nil` to drop WebKit's last strong reference.
+  No-op if already unloaded.
 - `- (void) ReloadWebView` is a no-op if a webview already exists (i.e. it
   wasn't unloaded); otherwise it calls `attachWebView` and reloads
   `startURLString`.
@@ -119,9 +138,57 @@ Application.h, Application.m, window.go, frontend.go}`.
 
 This codebase does **not** use ARC (no `-fobjc-arc` in any `#cgo CFLAGS`) —
 it is manual retain/release (MRC), consistent with the explicit
-`retain`/`release`/`dealloc` calls already present in `WailsContext.m`. The
-new `webviewConfiguration` and `startURLString` properties are declared
-`(retain)` and released in `dealloc`, matching the existing style.
+`retain`/`release`/`dealloc` calls already present in `WailsContext.m`.
+`startURLString` and `userContentController` are declared `(retain)` and
+released in `dealloc`, matching the existing style. `wailsURLSchemeHandler`
+is `(nonatomic, assign)` — deliberately unretained, because the object is
+always `self`; retaining it would create a self-retain cycle that prevents
+`WailsContext` (and everything it owns) from ever being deallocated. Each
+call to `attachWebView` builds a local `WKWebViewConfiguration*` with
+`alloc`/`new`, hands it to `-[WailsWebView initWithFrame:configuration:]`,
+and releases it immediately afterwards — balanced, and safe because
+`WKWebView` copies the configuration at init time rather than retaining the
+instance it was given.
+
+### Why `UnloadWebView` didn't actually terminate the WebContent process
+
+An earlier version of this fork (see the "darwin implementation" section
+above, describing the state of things immediately after the initial
+addition of `UnloadWebView`/`ReloadWebView`) claimed that releasing the
+`WKWebView` was sufficient for its WebContent process to exit and its
+memory to be returned to the OS. **Real-world testing in the host app
+(UX-Music) showed this was wrong**: `com.apple.WebKit.WebContent` survived
+`UnloadWebView` indefinitely — shrunken and App Nap-suspended rather than
+gone — and its memory was only returned to the OS minutes later, at a
+nondeterministic time. Manually killing the WebContent process from
+Activity Monitor confirmed the app's native audio playback (which runs in
+the main process, not the webview) was unaffected, which is what made it
+safe to pursue a more aggressive fix here.
+
+The root cause was that `UnloadWebView` released the `WKWebView` instance
+but the `WailsContext` object itself kept the **`WKWebViewConfiguration`**
+retained (as `self.webviewConfiguration`) so that `ReloadWebView` could
+reuse it. A `WKWebViewConfiguration` carries a `WKProcessPool`, and
+WebKit's WebContent process lifecycle is tied to process pools and their
+associated caches, not just to the `WKWebView` instances that were created
+from a given configuration. Keeping the configuration (and therefore the
+process pool) alive kept WebKit's internal bookkeeping pointed at a process
+it could reuse, so instead of tearing it down WebKit suspended it — correct
+behaviour from WebKit's point of view (it is optimising for a fast
+subsequent reload), but the opposite of what `UnloadWebView`'s memory-relief
+goal needed.
+
+The fix (this change) is to never retain a `WKWebViewConfiguration` across
+an unload/reload cycle. `attachWebView` now builds one from scratch, from
+primitive/reusable pieces that don't carry a process pool reference forward
+(see the "darwin implementation" section above). Additionally,
+`UnloadWebView` now attempts the private `-[WKWebView _close]` method,
+guarded by `respondsToSelector:`, as a best-effort synchronous nudge; this
+is WebKit SPI (not public API), could disappear or change behaviour in a
+future WebKit release without notice, and is not the primary fix — it is
+the config-rebuild that is expected to make WebKit actually let the
+WebContent process go, rather than merely suspend it, because there is no
+longer a retained process pool giving WebKit a reason to keep it around.
 
 ### IPC bridge / runtime JS injection after recreation
 
@@ -129,39 +196,42 @@ Verified by reading `CreateWindow`:
 
 - The IPC bridge is the `"external"` script message handler, registered via
   `[userContentController addScriptMessageHandler:self name:@"external"]`
-  on the `WKUserContentController` that is now retained via
-  `self.webviewConfiguration.userContentController` (same object,
-  `self.userContentController` also keeps a direct reference). It is
-  registered exactly once, at `CreateWindow` time, and is never
-  re-registered elsewhere in the codebase. Because `ReloadWebView` reuses
-  the same configuration/controller object, a recreated webview gets the
-  same message handler without any extra registration work.
+  on the `WKUserContentController` retained as `self.userContentController`.
+  It is registered exactly once, at `CreateWindow` time, and is never
+  re-registered elsewhere in the codebase. Because `attachWebView` assigns
+  the same retained controller object (`config.userContentController =
+  self.userContentController`) onto every freshly built configuration, a
+  recreated webview gets the same message handler without any extra
+  registration work.
 - The only injected `WKUserScript` set up in `CreateWindow` is the
   "disable default context menu" flag script — also added to the same
   retained `userContentController`, so it also survives recreation.
 - The actual Wails JS runtime (`window.wails`, event bridge, etc.) is
   **not** injected as a `WKUserScript` in the darwin frontend — it is served
   as part of the HTML/JS asset bundle through the custom `wails://` URL
-  scheme handler (`config setURLSchemeHandler:self forURLScheme:@"wails"`,
-  handled by `WailsContext`'s `WKURLSchemeHandler` implementation,
-  ultimately backed by `assetserver.AssetServer`). Since a fresh webview
-  reloading `startURLString` (`wails://wails/...`) re-requests and re-runs
-  that bundle from scratch, the runtime boots up again exactly as it does
-  on first launch — i.e. recreating the webview is equivalent to a full
-  page reload/app relaunch from the SPA's point of view, which matches the
+  scheme handler, re-registered on every fresh configuration via
+  `[config setURLSchemeHandler:self.wailsURLSchemeHandler
+  forURLScheme:@"wails"]` (handled by `WailsContext`'s
+  `WKURLSchemeHandler` implementation, ultimately backed by
+  `assetserver.AssetServer`). Since a fresh webview reloading
+  `startURLString` (`wails://wails/...`) re-requests and re-runs that
+  bundle from scratch, the runtime boots up again exactly as it does on
+  first launch — i.e. recreating the webview is equivalent to a full page
+  reload/app relaunch from the SPA's point of view, which matches the
   design intent ("Reload → app relaunch semantics").
-- The `WKWebViewConfiguration` itself is *copied* internally by
+- `WKWebViewConfiguration` is *copied* internally by
   `-[WKWebView initWithFrame:configuration:]` (Apple's documented behaviour:
   `WKWebViewConfiguration` conforms to `NSCopying`, and `WKWebView` makes an
   immutable copy at init time). This copy is a shallow copy — the copied
-  configuration's `userContentController`, `websiteDataStore`, scheme
-  handlers, etc. reference the *same* underlying objects as the original.
-  This is exactly why keeping the *original* `WKWebViewConfiguration`
-  (rather than only the `userContentController`) retained and reused for
-  every recreation is both sufficient and necessary: every new `WKWebView`
-  gets an independent copy of the configuration wrapper, but all the
-  registrations inside it (message handlers, scheme handler, preferences)
-  are shared, live objects.
+  configuration's `userContentController`, scheme handlers, etc. reference
+  the *same* underlying objects as the original passed to
+  `attachWebView`'s local `config`, which is why it is safe to build
+  `config` fresh and release it immediately: the live `WKWebView` keeps its
+  own copy, and that copy's registrations still point at the shared,
+  long-lived `userContentController`/scheme handler objects retained on
+  `self` — see "Why `UnloadWebView` didn't actually terminate the
+  WebContent process" above for why the configuration *object* itself is
+  deliberately *not* one of those long-lived retained things.
 
 ## Build verification
 
@@ -194,15 +264,25 @@ Verified in this repository (macOS, Xcode toolchain):
 
 ## What could not be verified by compilation alone
 
-- Runtime behaviour: that `UnloadWebView` actually causes WebKit's
-  WebContent process to exit and the RSS to drop, and that
-  `ReloadWebView` produces a working, IPC-connected webview again with no
-  visual glitches (frame/autoresizing/transparency restored correctly).
-  This needs an app-side integration test running the actual UX-Music
-  binary (or a minimal Wails v2 darwin sample app) through a
-  hide → unload → wait → reload → show cycle, observing both memory (e.g.
-  Activity Monitor / `vmmap` on the WebContent process) and that the SPA
-  and IPC bridge come back up correctly.
+- **WebContent process exit timing**: whether `UnloadWebView`, after this
+  change, causes `com.apple.WebKit.WebContent` to actually terminate (not
+  just shrink/suspend), and how quickly — immediately as a result of
+  dropping the last `WKWebViewConfiguration`/`WKProcessPool` reference plus
+  the `_close` SPI call, or only eventually. This can only be observed by
+  running the real host app (or a minimal Wails v2 darwin sample) through a
+  hide → unload → wait cycle and watching the WebContent process's PID in
+  Activity Monitor / `ps` — does the process disappear, and if so within
+  what timeframe relative to before this change (previously: minutes,
+  nondeterministic). Compilation and static review can confirm the
+  configuration is no longer retained and that `_close` is invoked when
+  available, but not what WebKit actually does in response on a given OS
+  version.
+- Runtime behaviour more broadly: that `ReloadWebView` produces a working,
+  IPC-connected webview again with no visual glitches (frame/autoresizing/
+  transparency restored correctly) after an unload, using the freshly
+  rebuilt configuration. This needs the same app-side integration test as
+  above, extended through hide → unload → wait → reload → show, observing
+  memory and that the SPA and IPC bridge come back up correctly.
 - Interaction with `HideWindowOnClose` / `StartHidden` / single-instance
   relaunch flows, and with window resize while unloaded (no webview to
   resize — the `NSView` autoresizing mask is only applied when the webview
