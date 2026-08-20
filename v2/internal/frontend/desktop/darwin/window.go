@@ -183,6 +183,20 @@ func (w *Window) ExecJS(js string) {
 	C.free(unsafe.Pointer(_js))
 }
 
+// UnloadWebView destroys the underlying WKWebView (and its WebContent
+// process), freeing the memory used for rendering. The window itself
+// remains untouched and can be restored with ReloadWebView.
+func (w *Window) UnloadWebView() {
+	C.UnloadWebView(w.context)
+}
+
+// ReloadWebView recreates the WKWebView after a previous call to
+// UnloadWebView and reloads the application's start URL. It is a no-op if
+// the webview is already loaded.
+func (w *Window) ReloadWebView() {
+	C.ReloadWebView(w.context)
+}
+
 func (w *Window) SetPosition(x int, y int) {
 	C.SetPosition(w.context, C.int(x), C.int(y))
 }

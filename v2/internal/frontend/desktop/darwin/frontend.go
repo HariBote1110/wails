@@ -298,6 +298,22 @@ func (f *Frontend) WindowHide() {
 	f.mainWindow.Hide()
 }
 
+// WindowUnloadWebView destroys the webview so that WebKit can reclaim the
+// memory used by its rendering (WebContent) process. The window itself is
+// left untouched, and events sent to a stale Frontend reference while the
+// webview is unloaded (e.g. Notify/ExecJS) are safely dropped by the
+// Objective-C layer.
+func (f *Frontend) WindowUnloadWebView() {
+	f.mainWindow.UnloadWebView()
+}
+
+// WindowReloadWebView recreates the webview previously destroyed by
+// WindowUnloadWebView and reloads the application. It is a no-op if the
+// webview is already loaded.
+func (f *Frontend) WindowReloadWebView() {
+	f.mainWindow.ReloadWebView()
+}
+
 func (f *Frontend) Show() {
 	f.mainWindow.ShowApplication()
 }
