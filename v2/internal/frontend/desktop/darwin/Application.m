@@ -249,6 +249,20 @@ void ShowApplication(void *inctx) {
     );
 }
 
+void UnloadWebView(void *inctx) {
+    WailsContext *ctx = (__bridge WailsContext*) inctx;
+    ON_MAIN_THREAD(
+       [ctx UnloadWebView];
+    );
+}
+
+void ReloadWebView(void *inctx) {
+    WailsContext *ctx = (__bridge WailsContext*) inctx;
+    ON_MAIN_THREAD(
+       [ctx ReloadWebView];
+    );
+}
+
 NSString* safeInit(const char* input) {
     NSString *result = nil;
     if (input != nil) {
@@ -406,6 +420,9 @@ void WindowPrint(void *inctx) {
         ON_MAIN_THREAD(
             WailsContext *ctx = (__bridge WailsContext*) inctx;
             WKWebView* webView = ctx.webview;
+            if (webView == nil) {
+                return;
+            }
 
             // I think this should be exposed as a config
             // It directly affects the printed output/PDF
